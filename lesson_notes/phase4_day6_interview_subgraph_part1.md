@@ -238,6 +238,136 @@ def search_baike(state: InterviewState):
 
 ---
 
+## 深度理解一：节点名 vs 函数名
+
+流程图里写 `ask_question`，代码里写 `generate_question`，为什么不一样？
+
+```python
+# 节点名（写在图里的）     函数名（实际执行的代码）
+builder.add_node("ask_question", generate_question)
+#                 ↑ 图里的名字          ↑ Python 函数名
+```
+
+- **`"ask_question"`** — 图里的节点名称，用在 add_edge / add_conditional_edges 里
+- **`generate_question`** — Python 函数名，实现具体逻辑
+
+就好比一个人在公司叫"张经理"（节点名），身份证上叫"张伟"（函数名）。
+
+源码里也是这样的（`research_assistant.py:1058`）：
+```python
+interview_builder.add_node("ask_question", generate_question)
+```
+
+## 深度理解二：四个提示词对应四个节点
+
+| 提示词 | 节点 | 用在 |
+|--------|------|------|
+| question_instructions | ask_question | 分析师提问 |
+| search_instructions | search_web / search_baike | 生成搜索词 |
+| answer_instructions | answer_question（Day 7） | 专家回答 |
+| section_writer_instructions | write_section（Day 7） | 写报告小节 |
+
+**answer_instructions（Day 7 用到）：**
+
+```python
+answer_instructions = """你是一位被分析师访谈的专家。
+
+以下是分析师的关注领域：{goals}。
+
+你的目标是回答访谈者提出的问题。
+
+回答问题时，请仅使用以下上下文：
+
+{context}
+
+回答须遵循如下要求：
+1. 只使用上下文中提供的信息。
+2. 不要引入上下文之外的信息。
+3. 在涉及具体论断时，标注引用来源编号 [1] [2]。
+4. 在答案结尾处按顺序列出引用来源。"""
+```
+
+**占位符：** `{goals}` 填 analyst.persona，`{context}` 填搜索结果。
+
+## 深度理解三：整个项目的完整数据流
+
+从用户输入到最终报告：
+
+```
+用户输入: topic="AI医疗", max_analysts=3
+                    │
+                    ▼
+        ┌───────────────────────┐
+        │    create_analysts     │  LLM 生成 3 个 Analyst
+        │    读: topic           │  写: analysts
+        └───────────┬───────────┘
+                    │
+                    ▼
+        ┌───────────────────────┐
+        │    human_feedback     │  暂停等人类审核
+        │    (interrupt_before)  │
+        └───────────┬───────────┘
+                    │ 人类放行，无反馈
+                    ▼
+        ┌───────────────────────────────────────────────┐
+        │        initiate_all_interviews (Map)           │
+        │                                               │
+        │   为每个 analyst 创建一个 Send，并行启动       │
+        │                                               │
+        │   Send("conduct_interview", {analyst1, msg})  │──→ 子图实例1
+        │   Send("conduct_interview", {analyst2, msg})  │──→ 子图实例2
+        │   Send("conduct_interview", {analyst3, msg})  │──→ 子图实例3
+        │                                               │
+        │   三个子图同时运行，互不等待                    │
+        └───────────────────────────────────────────────┘
+                            │
+          ┌─────────────────┼─────────────────┐
+          ▼                 ▼                 ▼
+     ┌──────────┐     ┌──────────┐     ┌──────────┐
+     │ 子图实例1  │     │ 子图实例2  │     │ 子图实例3  │
+     │          │     │          │     │          │
+     │ analyst1 │     │ analyst2 │     │ analyst3 │
+     │ 循环访谈   │     │ 循环访谈   │     │ 循环访谈   │
+     │ 2轮问答   │     │ 2轮问答   │     │ 2轮问答   │
+     │          │     │          │     │          │
+     │ 返回:     │     │ 返回:     │     │ 返回:     │
+     │ sections │     │ sections │     │ sections │
+     │ =["小节1"]│     │ =["小节2"]│     │ =["小节3"]│
+     └──────────┘     └──────────┘     └──────────┘
+          │                 │                 │
+          └─────────────────┼─────────────────┘
+                            │
+                            │  operator.add 自动累加
+                            ▼
+                  ResearchGraphState.sections =
+                  ["小节1", "小节2", "小节3"]
+                            │
+              ┌─────────────┼─────────────┐
+              ▼             ▼             ▼
+      ┌────────────┐ ┌────────────┐ ┌────────────┐
+      │write_report│ │write_intro │ │write_conclu│  三路并行
+      │ 读:sections│ │ 读:sections│ │ 读:sections│
+      │ 写:content │ │ 写:intro   │ │ 写:conclu  │
+      └──────┬─────┘ └──────┬─────┘ └──────┬─────┘
+             │              │              │
+             └──────────────┼──────────────┘
+                            ▼
+                 ┌────────────────────┐
+                 │  finalize_report   │
+                 │  读: intro +       │
+                 │      content +     │
+                 │      conclusion    │
+                 │  写: final_report  │
+                 └────────────────────┘
+                            │
+                            ▼
+                     final_report (Markdown)
+```
+
+**一句话总结：** 用户给主题 → 生成 N 个分析师 → N 个子图并行访谈 → sections 累加 → 三路并行写报告 → 组装最终报告。
+
+---
+
 ## 参考源码位置
 
 | 内容 | 文件 | 行号 |
