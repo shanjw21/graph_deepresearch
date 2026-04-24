@@ -99,9 +99,9 @@ llm = ChatOpenAI(model=model, temperature=0, base_url=base_url, api_key=api_key)
 
 # TODO: 初始化搜索工具
 # 提示：
-#   from langchain_community.tools.tavily_search import TavilySearchResults
-#   from langchain_community.document_loaders import WikipediaLoader
-#   tavily_search = TavilySearchResults(max_results=3)
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_community.document_loaders import WikipediaLoader
+tavily_search = TavilySearchResults(max_results=3)
 
 
 
@@ -121,7 +121,11 @@ def generate_question(state: InterviewState):
 
     参考源码：research_assistant.py 第 640-664 行
     """
-    pass
+    analyst = state["analyst"]
+    messages = state["messages"]
+    system_prompt = question_instructions.format(goals=analyst.persona)
+    question = llm.invoke([SystemMessage(content=system_prompt)] + messages)
+    return {"messages":[question]}
 
 
 def search_web(state: InterviewState):
@@ -138,7 +142,14 @@ def search_web(state: InterviewState):
 
     参考源码：research_assistant.py 第 667-694 行
     """
-    pass
+    structured_llm = llm.with_structured_output(SearchQuery,method="function_calling")
+    search_query = structured_llm.invoke([search_instructions] + state["messages"])
+    search_docs = tavily_search.invoke(search_query.search_query)
+    formatted_docs = "\n\n---\n\n".join([
+        f'<Document href="{doc["url"]}" />\n{doc["content"]}\n</Document>'
+        for doc in search_docs
+    ])
+    return {"context":[formatted_docs]}
 
 
 def search_baike(state: InterviewState):
@@ -154,19 +165,26 @@ def search_baike(state: InterviewState):
 
     参考源码：research_assistant.py 第 697-727 行
     """
-    pass
+    structured_llm = llm.with_structured_output(SearchQuery,method="function_calling")
+    search_query = structured_llm.invoke([search_instructions] + state["messages"])
+    search_docs = WikipediaLoader(query=search_query.search_query,load_max_docs=2).load()
+    formatted_docs = "\n\n---\n\n".join([
+        f'<Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page","")}"/> \n{doc.page_content}\n</Document>' 
+        for doc in search_docs
+    ])
+    return {"context":[formatted_docs]}
 
 
 # ============================================
 # 构建图 —— 你来实现
 # ============================================
 
-# builder = StateGraph(InterviewState)
+builder = StateGraph(InterviewState)
 
 # TODO: 添加 3 个节点
-# builder.add_node("ask_question", generate_question)
-# builder.add_node("search_web", search_web)
-# builder.add_node("search_baike", search_baike)
+builder.add_node("ask_question", generate_question)
+builder.add_node("search_web", search_web)
+builder.add_node("search_baike", search_baike)
 
 # TODO: 添加边
 # START → ask_question
@@ -174,9 +192,14 @@ def search_baike(state: InterviewState):
 # ask_question → search_baike（并行）
 # search_web → END（暂时的，Day 7 会改成 answer_question）
 # search_baike → END（暂时的）
+builder.add_edge(START,"ask_question")
+builder.add_edge("ask_question","search_web")
+builder.add_edge("ask_question","search_baike")
+builder.add_edge("search_web",END)
+builder.add_edge("search_baike",END)
 
 # TODO: 编译
-# graph = builder.compile()
+graph = builder.compile()
 
 
 # ============================================
@@ -203,10 +226,10 @@ if __name__ == "__main__":
     print("=== 生成的提问 ===")
     for msg in result["messages"]:
         if isinstance(msg, AIMessage):
-            print(f"  AI: {msg.content[:100]}...")
+            print(f"  AI: {msg.content}")
 
     print(f"\n=== 搜索结果（context 有 {len(result['context'])} 条）===")
     for i, ctx in enumerate(result["context"]):
-        print(f"  [{i+1}] {ctx[:150]}...")
+        print(f"  [{i+1}] {ctx}")
 
     print("\nDay 6 完成！明天加入 answer_question 和循环。")
