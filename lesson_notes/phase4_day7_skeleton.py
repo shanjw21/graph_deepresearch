@@ -125,9 +125,9 @@ section_writer_instructions = """你是一名资深技术写作者。
 llm = ChatOpenAI(model=model, temperature=0, base_url=base_url, api_key=api_key)
 
 # TODO: 如果你没有 Tavily，可以保留这个导入但加 try-except 降级
-# from langchain_community.tools.tavily_search import TavilySearchResults
-# from langchain_community.document_loaders import WikipediaLoader
-# tavily_search = TavilySearchResults(max_results=3)
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_community.document_loaders import WikipediaLoader
+tavily_search = TavilySearchResults(max_results=3)
 
 
 # ============================================
@@ -137,19 +137,37 @@ llm = ChatOpenAI(model=model, temperature=0, base_url=base_url, api_key=api_key)
 def generate_question(state: InterviewState):
     """分析师提问（Day 6 已实现，搬过来即可）"""
     # TODO: 复制你 Day 6 的实现
-    pass
+    analyst = state["analyst"]
+    messages = state["messages"]
+    system_prompt = question_instructions.format(goals=analyst.persona)
+    question = llm.invoke([SystemMessage(content=system_prompt)] + messages)
+    return {"messages":[question]}
 
 
 def search_web(state: InterviewState):
     """Web 搜索（Day 6 已实现，搬过来即可）"""
     # TODO: 复制你 Day 6 的实现
-    pass
+    structured_llm = llm.with_structured_output(SearchQuery,method="function_calling")
+    search_query = structured_llm.invoke([search_instructions] + state["messages"])
+    search_docs = tavily_search.invoke(search_query.search_query)
+    formatted_docs = "\n\n---\n\n".join([
+        f'<Document href="{doc["url"]}" />\n{doc["content"]}\n</Document>'
+        for doc in search_docs
+    ])
+    return {"context":[formatted_docs]}
 
 
 def search_baike(state: InterviewState):
     """百科搜索（Day 6 已实现，搬过来即可）"""
     # TODO: 复制你 Day 6 的实现
-    pass
+    structured_llm = llm.with_structured_output(SearchQuery,method="function_calling")
+    search_query = structured_llm.invoke([search_instructions] + state["messages"])
+    search_docs = WikipediaLoader(query=search_query.search_query,load_max_docs=2).load()
+    formatted_docs = "\n\n---\n\n".join([
+        f'<Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page","")}"/> \n{doc.page_content}\n</Document>' 
+        for doc in search_docs
+    ])
+    return {"context":[formatted_docs]}
 
 
 def generate_answer(state: InterviewState):
@@ -165,7 +183,15 @@ def generate_answer(state: InterviewState):
 
     参考源码：research_assistant.py 第 730-759 行
     """
-    pass
+    analyst = state["analyst"]
+    messages = state["messages"]
+    context = state["context"]
+    system_messages = answer_instructions.format(goals=analyst.persona,
+                                                 context=context)
+    answer = llm.invoke([SystemMessage(content=system_messages)] + messages)
+    answer.name = "expert"
+    return {"messages":[answer]}
+
 
 
 def save_interview(state: InterviewState):
@@ -179,7 +205,9 @@ def save_interview(state: InterviewState):
 
     参考源码：research_assistant.py 第 762-782 行
     """
-    pass
+    messages = state["messages"]
+    interview = get_buffer_string(messages=messages)
+    return {"interview":interview}
 
 
 def write_section(state: InterviewState):
@@ -194,7 +222,14 @@ def write_section(state: InterviewState):
 
     参考源码：research_assistant.py 第 828-856 行
     """
-    pass
+    interview = state["interview"]
+    context = state["context"]
+    analyst = state["analyst"]
+    system_messages = section_writer_instructions.format(focus=analyst.description)
+    section = llm.invoke([SystemMessage(content=system_messages),
+                          HumanMessage(content=f"使用这些来源撰写你的小节：{context}")])
+    return {"sections":[section.content]}
+
 
 
 # ============================================
@@ -214,22 +249,34 @@ def route_messages(state: InterviewState, name: str = "expert"):
 
     参考源码：research_assistant.py 第 785-821 行
     """
-    pass
+    messages = state["messages"]
+    max_num_turns = state.get("max_num_turns",2)
+    number_response = 0
+    for m in messages:
+        if isinstance(m,AIMessage) and m.name == name:
+            number_response += 1
+    if number_response >= max_num_turns:
+        return 'save_interview'
+    
+    last_questions = messages[-2]
+    if "非常感谢您的帮助!" in last_questions:
+        return 'save_interview'
+    return 'ask_question'
 
 
 # ============================================
 # 构建完整子图 —— 你来实现
 # ============================================
 
-# builder = StateGraph(InterviewState)
+builder = StateGraph(InterviewState)
 
 # TODO: 添加 6 个节点
-# builder.add_node("ask_question", generate_question)
-# builder.add_node("search_web", search_web)
-# builder.add_node("search_baike", search_baike)
-# builder.add_node("answer_question", generate_answer)
-# builder.add_node("save_interview", save_interview)
-# builder.add_node("write_section", write_section)
+builder.add_node("ask_question", generate_question)
+builder.add_node("search_web", search_web)
+builder.add_node("search_baike", search_baike)
+builder.add_node("answer_question", generate_answer)
+builder.add_node("save_interview", save_interview)
+builder.add_node("write_section", write_section)
 
 # TODO: 添加边
 # START → ask_question
@@ -241,8 +288,21 @@ def route_messages(state: InterviewState, name: str = "expert"):
 # save_interview → write_section
 # write_section → END
 
+builder.add_edge(START,"ask_question")
+builder.add_edge("ask_question","search_web")
+builder.add_edge("ask_question","search_baike")
+builder.add_edge("search_web","answer_question")
+builder.add_edge("search_baike","answer_question")
+builder.add_conditional_edges(
+    "answer_question",
+    route_messages,
+    ["ask_question", "save_interview"]
+)
+builder.add_edge("save_interview", "write_section")
+builder.add_edge("write_section", END)
+
 # TODO: 编译
-# graph = builder.compile()
+graph = builder.compile()
 
 
 # ============================================
