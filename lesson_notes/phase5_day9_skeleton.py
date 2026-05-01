@@ -249,22 +249,31 @@ def generate_question(state: InterviewState):
 def search_web(state: InterviewState):
     structured_llm = llm.with_structured_output(SearchQuery, method="function_calling")
     search_query = structured_llm.invoke([search_instructions] + state["messages"])
-    search_docs = tavily_search.invoke(search_query.search_query)
-    formatted_docs = "\n\n---\n\n".join([
-        f'<Document href="{doc["url"]}" />\n{doc["content"]}\n</Document>'
-        for doc in search_docs
-    ])
+    try:
+        search_docs = tavily_search.invoke(search_query.search_query)
+        formatted_docs = "\n\n---\n\n".join([
+            f'<Document href="{doc["url"]}" />\n{doc["content"]}\n</Document>'
+            if isinstance(doc, dict) else f'<Document />\n{doc}\n</Document>'
+            for doc in search_docs
+        ])
+    except Exception as e:
+        print(f"  [search_web 降级] {e}")
+        formatted_docs = f"<Document />Web搜索暂不可用，查询: {search_query.search_query}\n</Document>"
     return {"context": [formatted_docs]}
 
 
 def search_baike(state: InterviewState):
     structured_llm = llm.with_structured_output(SearchQuery, method="function_calling")
     search_query = structured_llm.invoke([search_instructions] + state["messages"])
-    search_docs = WikipediaLoader(query=search_query.search_query, load_max_docs=2).load()
-    formatted_docs = "\n\n---\n\n".join([
-        f'<Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page", "")}"/> \n{doc.page_content}\n</Document>'
-        for doc in search_docs
-    ])
+    try:
+        search_docs = WikipediaLoader(query=search_query.search_query, load_max_docs=2).load()
+        formatted_docs = "\n\n---\n\n".join([
+            f'<Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page", "")}"/> \n{doc.page_content}\n</Document>'
+            for doc in search_docs
+        ])
+    except Exception as e:
+        print(f"  [search_baike 降级] {e}")
+        formatted_docs = f"<Document />百科搜索暂不可用，查询: {search_query.search_query}\n</Document>"
     return {"context": [formatted_docs]}
 
 
@@ -395,7 +404,12 @@ def write_report(state: ResearchGraphState):
 
     参考源码：research_assistant.py 第 894-927 行
     """
-    pass
+    sections = state["sections"]
+    topic = state["topic"]
+    context = "\n\n".join(f"{section}" for section in sections)
+    system_messages = report_writer_instructions.format(topic=topic,context=context)
+    report = llm.invoke([SystemMessage(content=system_messages),HumanMessage(content="基于这些备忘录撰写一份报告。")])
+    return {"content":report.content}
 
 
 def write_introduction(state: ResearchGraphState):
@@ -411,7 +425,12 @@ def write_introduction(state: ResearchGraphState):
 
     参考源码：research_assistant.py 第 930-962 行
     """
-    pass
+    sections = state["sections"]
+    topic = state["topic"]
+    context = "\n\n".join(f"{section}" for section in sections)
+    system_messages = intro_conclusion_instructions.format(topic=topic,formatted_str_sections=context)
+    introduction = llm.invoke([SystemMessage(content=system_messages),HumanMessage(content="撰写报告引言")])
+    return {"introduction":introduction.content}
 
 
 def write_conclusion(state: ResearchGraphState):
@@ -427,7 +446,12 @@ def write_conclusion(state: ResearchGraphState):
 
     参考源码：research_assistant.py 第 965-997 行
     """
-    pass
+    sections = state["sections"]
+    topic = state["topic"]
+    context = "\n\n".join(f"{section}" for section in sections)
+    system_messages = intro_conclusion_instructions.format(topic=topic,formatted_str_sections=context)
+    conclusion = llm.invoke([SystemMessage(content=system_messages),HumanMessage(content="撰写报告结论")])
+    return {"conclusion":conclusion.content}
 
 
 def finalize_report(state: ResearchGraphState):
@@ -444,7 +468,28 @@ def finalize_report(state: ResearchGraphState):
 
     参考源码：research_assistant.py 第 1000-1043 行
     """
-    pass
+    content = state["content"]
+    if content.startswith("## Insights"):
+        content = content.strip("## Insights")
+    if "## Insights" in content:
+        try:
+            content, sources = content.split("\n## Sources\n")
+        except:
+            sources = None
+    else:
+        sources = None
+    
+    final_report = (
+        state["introduction"] +
+        "\n\n---\n\n" +
+        content +
+        "\n\n---\n\n" +
+        state["conclusion"]
+    )
+    if sources is not None:
+        final_report += "\n\n## Sources\n" + sources
+
+    return {"final_report": final_report}
 
 
 # ============================================
@@ -513,14 +558,78 @@ if __name__ == "__main__":
     print("\n--- 第2步：批准分析师，启动 Map-Reduce ---")
     graph.update_state(config, {"human_analyst_feedback": ""}, as_node="human_feedback")
 
-    # 第3步：恢复执行 → Map(并行访谈) + Reduce(三路并行) + finalize
-    result = graph.invoke(None, config)
+    # 第3步：恢复执行 → 用 stream 逐步查看每个节点的输出
+    print("\n--- 第3步：Map-Reduce 全流程 ---")
+    for event in graph.stream(None, config, stream_mode="updates"):
+        for node_name, node_output in event.items():
+            print(f"\n{'='*50}")
+            print(f"📍 节点: {node_name}")
+            print(f"{'='*50}")
 
-    # 打印最终报告
+            if node_name == "conduct_interview":
+                # 子图输出：打印对话过程和生成的小节
+                messages = node_output.get("messages", [])
+                sections = node_output.get("sections", [])
+                context_count = len(node_output.get("context", []))
+
+                analyst = node_output.get("analyst")
+                if analyst:
+                    print(f"  分析师: {analyst.name}（{analyst.affiliation}）")
+
+                print(f"  搜索结果: {context_count} 条")
+                print(f"  对话轮数: {len(messages)} 条消息")
+
+                print("\n  📝 对话过程:")
+                for msg in messages:
+                    if isinstance(msg, HumanMessage):
+                        print(f"    [Human] {msg.content[:100]}...")
+                    elif isinstance(msg, AIMessage):
+                        role = msg.name if msg.name else "分析师"
+                        print(f"    [{role}] {msg.content[:100]}...")
+
+                if sections:
+                    print(f"\n  📄 生成的报告小节:")
+                    for s in sections:
+                        print(f"    {s[:200]}...")
+
+            elif node_name == "write_report":
+                content = node_output.get("content", "")
+                print(f"  报告主体 ({len(content)} 字符):")
+                print(f"  {content[:300]}...")
+
+            elif node_name == "write_introduction":
+                intro = node_output.get("introduction", "")
+                print(f"  引言 ({len(intro)} 字符):")
+                print(f"  {intro[:200]}...")
+
+            elif node_name == "write_conclusion":
+                conclusion = node_output.get("conclusion", "")
+                print(f"  结论 ({len(conclusion)} 字符):")
+                print(f"  {conclusion[:200]}...")
+
+            elif node_name == "finalize_report":
+                report = node_output.get("final_report", "")
+                print(f"  完整报告 ({len(report)} 字符)")
+
+            else:
+                for k, v in node_output.items():
+                    if isinstance(v, list):
+                        print(f"  {k}: [{len(v)} 项]")
+                    elif isinstance(v, str):
+                        print(f"  {k}: {v[:100]}...")
+                    else:
+                        print(f"  {k}: {v}")
+
+    # 从 checkpointer 获取最终状态
+    result = graph.get_state(config).values
+
+    # 打印最终完整报告
     print("\n" + "=" * 60)
-    print(result["final_report"])
+    print("📋 最终完整报告")
+    print("=" * 60)
+    print(result.get("final_report", ""))
     print("=" * 60)
 
     print(f"\n✅ Day 9 完成！完整系统跑通。")
-    print(f"   sections 数量: {len(result['sections'])}")
-    print(f"   报告长度: {len(result['final_report'])} 字符")
+    print(f"   sections 数量: {len(result.get('sections', []))}")
+    print(f"   报告长度: {len(result.get('final_report', ''))} 字符")
