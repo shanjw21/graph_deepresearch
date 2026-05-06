@@ -49,6 +49,7 @@ from llm_guard.input_scanners import BanTopics
 # TODO: 创建暴力检测扫描器
 # 提示：BanTopics(topics=["violence"], threshold=0.5)
 # violence_scanner = BanTopics(...)
+violence_scanner = BanTopics(topics=["violence"],threshold=0.5)
 
 
 @observe()
@@ -65,7 +66,12 @@ def check_violence(user_input: str):
     参考源码：Cell 15
     """
     # TODO: 实现该函数
-    pass
+    sanitized_prompt, is_valid, risk_score = violence_scanner.scan(user_input)
+    if risk_score > 0.5:
+        return f"exist violence information in the user_input and risk_score is {risk_score}", risk_score
+    else:
+        return f"user_input is safe and user_input is {user_input}, ths risk_score is {risk_score}", risk_score
+    
 
 
 # ============================================
@@ -81,6 +87,9 @@ from llm_guard.vault import Vault
 # vault = Vault()
 # anonymize_scanner = Anonymize(vault, entity_types=["PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS"])
 # deanonymize_scanner = Deanonymize(vault)
+vault = Vault()
+anonymize_scanner = Anonymize(vault,entity_types=["PERSON", "PHONE_NUMBER","EMAIL_ADDRESS"])
+deanonymize_scanner = Deanonymize(vault)
 
 
 @observe()
@@ -95,11 +104,12 @@ def anonymize_input(user_input: str):
     参考源码：Cell 22-24
     """
     # TODO: 实现该函数
-    pass
+    sanitized, is_valid, risk = anonymize_scanner.scan(user_input)
+    return sanitized
 
 
 @observe()
-def deanonymize_output(llm_output: str):
+def deanonymize_output(user_input_sanitized:str, llm_output: str):
     """
     TODO: 对 LLM 输出进行 PII 还原
 
@@ -110,7 +120,8 @@ def deanonymize_output(llm_output: str):
     参考源码：Cell 22-24
     """
     # TODO: 实现该函数
-    pass
+    final_output, is_valid, risk = deanonymize_scanner.scan(user_input_sanitized,llm_output)
+    return final_output
 
 
 # ============================================
@@ -122,6 +133,7 @@ from llm_guard.input_scanners import PromptInjection
 # TODO: 创建注入检测扫描器
 # 提示：PromptInjection(threshold=0.5)
 # injection_scanner = PromptInjection(...)
+injection_scanner = PromptInjection(threshold=0.5)
 
 
 @observe()
@@ -138,7 +150,11 @@ def check_injection(user_input: str):
     参考源码：Cell 28
     """
     # TODO: 实现该函数
-    pass
+    sanitized, is_valid, risk_score = injection_scanner.scan(user_input)
+    if risk_score > 0.5:
+        return f"prompt injection exist in the user_input, user_input is {sanitized}, risk_score is {risk_score}", risk_score
+    else:
+        return f"prompt injection not exist in the user_input, user_input is {user_input}, risk_score is {risk_score}", risk_score
 
 
 # ============================================
@@ -161,7 +177,17 @@ def safe_generate(user_input: str):
     参考源码：Cell 15 + 22 + 28 组合
     """
     # TODO: 实现该函数
-    pass
+    sanitized, risk_score  = check_injection(user_input)
+    if risk_score > 0.5:
+        return "检测到潜在风险，请求已拦截"
+    sanitized, risk_score = check_violence(user_input)
+    if risk_score > 0.5:
+        return "存在暴力主题，请求已拦截"
+    sanitized = anonymize_input(user_input)
+    result = llm.invoke([HumanMessage(content=sanitized)])
+    final_output = deanonymize_output(sanitized,result.content)
+    return final_output
+
 
 
 # ============================================

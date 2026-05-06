@@ -90,10 +90,28 @@ sanitized, is_valid, risk = anonymize_scanner.scan(original_input)
 
 # ... LLM 处理 sanitized 输入 ...
 
-# 输出侧还原
+# 输出侧还原（需要同时传入脱敏文本和 LLM 输出）
 deanonymize_scanner = Deanonymize(vault)
-final_output, is_valid, risk = deanonymize_scanner.scan(llm_output)
+final_output, is_valid, risk = deanonymize_scanner.scan(sanitized, llm_output)
 ```
+
+1.sanitized 指脱敏后的文本
+```python
+original_input = "张三的电话是 138-1234-5678，邮箱是 zhangsan@email.com"
+sanitized = "[PERSON_1]的电话是 [PHONE_NUMBER_1]，邮箱是 [EMAIL_ADDRESS_1]"
+```
+2.is_valid 是否发现敏感信息
+- True：原始文本中包含敏感信息
+- False：原始文本中未发现需要脱敏的PII实体
+True意味着发现了敏感的PII信息，需要脱敏处理。
+
+3.risk RiskResult对象包含多个属性
+
+|属性 |说明|
+|---|---|
+|risk.score	| 风险分数（0-1），值越高表示风险越大|
+|risk.entities_found	|发现的实体类型和数量
+|risk.severity	|风险等级（如 LOW/MEDIUM/HIGH）
 
 **关键设计：Vault 是有状态的**
 - 同一个 Vault 实例保存了脱敏映射
@@ -154,8 +172,8 @@ def safe_generate(user_input):
     # 调用 LLM
     response = llm.invoke([HumanMessage(content=anonymized)])
 
-    # PII 还原
-    final_output, _, _ = deanonymize_scanner.scan(response.content)
+    # PII 还原（传入脱敏文本 + LLM 输出）
+    final_output, _, _ = deanonymize_scanner.scan(anonymized, response.content)
     return final_output
 ```
 
