@@ -282,3 +282,9 @@ __`update_state` 做了什么：__
 
 **Q2: "update_state 和直接传新输入有什么区别？"**
 > update_state 是原地修改已有状态中的某个字段（比如只改 human_analyst_feedback），不影响其他字段。直接传新输入会覆盖整个输入。update_state 更适合"微调"而不是"重来"。
+
+**Q3.interrupt_before 和 interrupt_after 的区别是什么？ 在 Deep Research 系统中，为什么选择 interrupt_before 而不是interrupt_after？**
+> interrupt_before 让流程在关键节点前暂停，人工审查后再决定是否继续或修改，实现可控的人机协同。
+
+**Q4. 当执行被中断后，怎么恢复执行？ 第二次 invoke() 时传入什么参数？如果用户想修改 State 中的数据，应该怎么做？**
+> 恢复流程的三步口诀：查（checkpointer 快照）→ 改（update_state）→ 继（invoke(None)）。面试时把这三步说清楚就够了。
