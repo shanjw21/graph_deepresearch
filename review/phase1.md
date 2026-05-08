@@ -68,8 +68,28 @@ Analyst ← Pydantic             ResearchGraphState ← TypedDict
 **如果没有 operator.add，** 你需要手动写代码合并 3 个并行节点的输出。有了它，LangGraph 自动帮你做。
 结论： "当多个并行节点返回同名 list 字段时，LangGraph 自动用 + 合并而不是覆盖。这是 Map-Reduce 模式实现并行结果聚合的核心机制。"
 **MessagesState 是 LangGraph 提供的特殊状态类，它的 messages 字段默认使用 operator.add。**
-
-
 #### 架构图:
 ![](../diagrams/01_data_model_architecture.png)
 
+### 2.三个状态模型
+
+#### 2.1分析师生成状态
+**数据流：**
+```
+用户输入 topic + max_analysts
+    ↓
+create_analysts 节点读取 topic，生成 analysts
+    ↓
+human_feedback 节点，人类可修改 human_analyst_feedback
+    ↓
+如果有反馈 → 回到 create_analysts，重新生成 analysts
+```
+![](../diagrams/01_分析师生成节点.png)
+
+#### 2.2 访谈子图状态
+
+![](../diagrams/02_访谈子图状态.png)
+
+#### 2.3 全局状态图
+
+![](../diagrams/03_全局状态图.png)

@@ -197,7 +197,7 @@ context（手动声明 Annotated[list, operator.add]）
 ```python
 class ResearchGraphState(TypedDict):
     topic: str                                   # 输入
-    max_analysts: int                            # 输入
+    max_analysts: int                            # 最多分析师数量
     human_analyst_feedback: str                  # 人机协同
     analysts: List[Analyst]                      # 分析师列表
     sections: Annotated[list, operator.add]      # ★ 累加：所有访谈的报告小节
