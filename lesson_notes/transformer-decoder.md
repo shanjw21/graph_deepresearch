@@ -348,3 +348,265 @@ logits: [6 × 50257]  ← 每个位置对 50257 个 token 的预测分数
 | `MLP` | 非线性变换，增加表达能力 | `768 → 3072 → 768` |
 | `Residual` | 缓解梯度消失，保留原始信息 | 直接相加 |
 | `Dropout` | 正则化，防止过拟合 | `p=0.1` |
+
+---
+
+## 六、`c_attn`：QKV 合并投影层详解
+
+### 为什么 Q、K、V 可以合并？
+
+在标准 Transformer 中，Q、K、V 是**三个独立的线性层**：
+
+```
+标准 Transformer:
+    Q = x × W_Q    (768 → 768)
+    K = x × W_K    (768 → 768)
+    V = x × W_V    (768 → 768)
+
+    三次独立计算，三个独立权重矩阵
+```
+
+但 GPT-2 把它们**合并成一次计算**：
+
+```
+GPT-2:
+    [Q, K, V] = x × W_c_attn    (768 → 2304)
+                              ↑
+                        768 × 3 = 2304
+
+    一次计算，一个权重矩阵，然后拆分
+```
+
+**数学上完全等价，但计算效率更高**（一次矩阵乘法 vs 三次）。
+
+---
+
+### `c_attn` 的结构
+
+```
+c_attn: Linear(768, 2304)
+
+权重矩阵 W_c_attn ∈ ℝ^(768 × 2304)
+偏置 b_c_attn ∈ ℝ^(2304)
+
+内部逻辑上分成三块:
+┌─────────────────────────────────────────────────────┐
+│                  W_c_attn (768 × 2304)              │
+│                                                      │
+│  ┌───────────────┬───────────────┬───────────────┐  │
+│  │   W_Q 块      │   W_K 块      │   W_V 块      │  │
+│  │  (768 × 768)  │  (768 × 768)  │  (768 × 768)  │  │
+│  │               │               │               │  │
+│  │  用于生成 Q   │  用于生成 K   │  用于生成 V   │  │
+│  └───────────────┴───────────────┴───────────────┘  │
+│         ↓                ↓                ↓          │
+│      列 0~767        列 768~1535     列 1536~2303    │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
+### 前向传播过程
+
+```
+输入: hidden ∈ ℝ^(batch × seq_len × 768)
+
+Step 1: 线性投影（一次矩阵乘法）
+        qkv = hidden × W_c_attn + b_c_attn
+        qkv ∈ ℝ^(batch × seq_len × 2304)
+
+Step 2: 拆分成 Q, K, V
+        Q, K, V = chunk(qkv, 3, dim=-1)
+
+        Q ∈ ℝ^(batch × seq_len × 768)
+        K ∈ ℝ^(batch × seq_len × 768)
+        V ∈ ℝ^(batch × seq_len × 768)
+
+Step 3: 拆分成多头（12 个头）
+        Q = reshape(Q, batch, seq_len, 12, 64)
+        K = reshape(K, batch, seq_len, 12, 64)
+        V = reshape(V, batch, seq_len, 12, 64)
+
+        每个头 64 维: 768 / 12 = 64
+
+Step 4: 计算注意力
+        score = Q × K^T / √64
+        attn = softmax(mask(score)) × V
+
+Step 5: 拼接所有头
+        output = reshape(attn, batch, seq_len, 768)
+```
+
+---
+
+### 具体数值示例
+
+```
+输入: "The cat sat"
+      ↓ tokenizer
+input_ids: [464, 3797, 3332]    (3 个 token)
+
+经过 Embedding 后:
+hidden ∈ ℝ^(1 × 3 × 768)
+        ↓
+┌─────────────────────────────────────────────────────────┐
+│                    c_attn 线性层                         │
+│                                                          │
+│  hidden × W_c_attn = qkv                                │
+│                                                          │
+│  (1 × 3 × 768) × (768 × 2304) = (1 × 3 × 2304)        │
+│                                                          │
+│  每个 token 的 768 维向量 → 2304 维向量                   │
+└──────────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+                  qkv ∈ ℝ^(1 × 3 × 2304)
+                           │
+            ┌──────────────┼──────────────┐
+            │              │              │
+            ▼              ▼              ▼
+     Q ∈ ℝ^(1×3×768)  K ∈ ℝ^(1×3×768)  V ∈ ℝ^(1×3×768)
+            │              │              │
+            ▼              ▼              ▼
+     拆成 12 个头     拆成 12 个头     拆成 12 个头
+     每头 (1×3×64)   每头 (1×3×64)   每头 (1×3×64)
+            │              │              │
+            └──────────────┼──────────────┘
+                           │
+                           ▼
+                   Multi-Head Attention
+```
+
+---
+
+### PyTorch 代码实现
+
+```python
+import torch
+import torch.nn as nn
+
+class GPT2Attention(nn.Module):
+    def __init__(self, hidden_size=768, num_heads=12):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.head_size = hidden_size // num_heads  # 64
+
+        # QKV 合并投影层
+        self.c_attn = nn.Linear(hidden_size, 3 * hidden_size)  # 768 → 2304
+
+        # 输出投影层
+        self.c_proj = nn.Linear(hidden_size, hidden_size)  # 768 → 768
+
+    def forward(self, x):
+        batch_size, seq_len, _ = x.shape
+
+        # Step 1: QKV 合并投影
+        qkv = self.c_attn(x)  # (batch, seq, 2304)
+
+        # Step 2: 拆分成 Q, K, V
+        Q, K, V = qkv.chunk(3, dim=-1)  # 各 (batch, seq, 768)
+
+        # Step 3: 拆分成多头
+        Q = Q.view(batch_size, seq_len, self.num_heads, self.head_size)
+        K = K.view(batch_size, seq_len, self.num_heads, self.head_size)
+        V = V.view(batch_size, seq_len, self.num_heads, self.head_size)
+
+        # 转置为 (batch, num_heads, seq, head_size)
+        Q = Q.transpose(1, 2)
+        K = K.transpose(1, 2)
+        V = V.transpose(1, 2)
+
+        # Step 4: 计算注意力
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.head_size ** 0.5)
+        # scores: (batch, num_heads, seq, seq)
+
+        # 应用因果掩码（下三角矩阵）
+        mask = torch.tril(torch.ones(seq_len, seq_len)).to(x.device)
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+
+        attn_weights = torch.softmax(scores, dim=-1)
+        attn_output = torch.matmul(attn_weights, V)
+        # attn_output: (batch, num_heads, seq, head_size)
+
+        # Step 5: 拼接所有头
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, seq_len, self.hidden_size)
+        # attn_output: (batch, seq, 768)
+
+        # Step 6: 输出投影
+        output = self.c_proj(attn_output)
+        # output: (batch, seq, 768)
+
+        return output
+```
+
+---
+
+### 为什么 GPT-2 用合并方式？
+
+| 对比 | 分离投影（标准） | 合并投影（GPT-2） |
+|------|----------------|------------------|
+| **矩阵乘法次数** | 3 次 | 1 次 |
+| **权重矩阵数量** | 3 个 | 1 个 |
+| **计算效率** | 较慢 | 较快 |
+| **数学等价性** | - | 完全等价 |
+| **实现简洁性** | 代码多 | 代码少 |
+
+```
+标准方式:
+    Q = x × W_Q    ← 第 1 次矩阵乘法
+    K = x × W_K    ← 第 2 次矩阵乘法
+    V = x × W_V    ← 第 3 次矩阵乘法
+
+GPT-2 方式:
+    qkv = x × W_c_attn  ← 只有 1 次矩阵乘法
+    Q, K, V = split(qkv)
+
+GPU 上，一次大矩阵乘法比三次小矩阵乘法更快（更好的并行性）
+```
+
+---
+
+### Q、K、V 的语义解释
+
+```
+Q = Query（查询）：我在找什么？
+    → 当前 token 想要关注哪些信息
+
+K = Key（键）：我能提供什么？
+    → 每个 token 能提供的"索引"信息
+
+V = Value（值）：我的实际内容是什么？
+    → 每个 token 的实际语义内容
+
+注意力计算:
+    score = Q × K^T    → 当前 token 与每个 token 的"相关性"
+    output = softmax(score) × V    → 根据相关性加权提取信息
+
+例子: "The cat sat on the mat"
+    当处理 "sat" 时:
+    Q("sat") × K("cat") = 高分  → "sat" 和 "cat" 高度相关
+    Q("sat") × K("the") = 低分  → "sat" 和 "the" 相关性低
+
+    所以 "sat" 会更多地关注 "cat" 的 Value 信息
+```
+
+---
+
+### 总结
+
+```
+c_attn 的本质:
+    一个 Linear(768, 2304) 层
+    = 把 Q、K、V 三个投影合并成一次计算
+    = 输出后拆分成三份，分别作为 Q、K、V
+    = 数学上等价于三个独立的 Linear(768, 768)
+    = 但计算效率更高（1 次大矩阵乘法 vs 3 次小矩阵乘法）
+
+"QKV 合并投影层" 这个名字的含义:
+    Q = Query（查询）：我在找什么？
+    K = Key（键）：每个 token 能提供什么？
+    V = Value（值）：每个 token 的实际内容是什么？
+    c_attn 把这三者一次性算出来，所以叫 "QKV 合并投影"
+```
